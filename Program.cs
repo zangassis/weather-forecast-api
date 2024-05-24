@@ -1,6 +1,8 @@
+using System.Reflection;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using WeatherForecastAPI.Data;
+using WeatherForecastAPI.Extension;
 using WeatherForecastAPI.Models;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -36,44 +38,56 @@ app.MapGet("/weather/{city}", async (string city, WeatherForecastDbContext db, I
     return weather == null ? Results.NotFound("Weather data not found for the specified city.") : Results.Ok(weather);
 });
 
-app.MapPost("/weather", async (WeatherForecast forecast, WeatherForecastDbContext db) =>
+app.MapGet("/weather/cities", async (WeatherForecastDbContext db, IMemoryCache cache) =>
 {
-    db.WeatherForecasts.Add(forecast);
+    const string cacheKey = "cities_with_weather";
 
-    await db.SaveChangesAsync();
+    if (!cache.TryGetValue(cacheKey, out List<string> cities))
+    {
+        cities = await db.WeatherForecasts
+                         .Select(w => w.City)
+                         .Distinct()
+                         .ToListAsync();
 
-    return Results.Created($"/weather/{forecast.Id}", forecast);
+        var cacheEntryOptions = new MemoryCacheEntryOptions()
+            .SetAbsoluteExpiration(TimeSpan.FromMinutes(30));
+
+        cache.Set(cacheKey, cities, cacheEntryOptions);
+    }
+
+    return Results.Ok(cities);
 });
 
-app.MapPut("/weather/{id}", async (int id, WeatherForecast updatedForecast, WeatherForecastDbContext db) =>
+app.MapPost("/weather/cache-update/{city}", async (string city, WeatherForecastDbContext db, IMemoryCache cache) =>
 {
-    var forecast = await db.WeatherForecasts.FindAsync(id);
+    var weather = await db.WeatherForecasts
+                          .OrderByDescending(w => w.Date)
+                          .FirstOrDefaultAsync(w => w.City == city);
 
-    if (forecast == null)
-        return Results.NotFound();
+    if (weather != null)
+    {
+        var cacheEntryOptions = new MemoryCacheEntryOptions()
+            .SetAbsoluteExpiration(TimeSpan.FromMinutes(10));
 
-    forecast.City = updatedForecast.City;
-    forecast.TemperatureC = updatedForecast.TemperatureC;
-    forecast.Summary = updatedForecast.Summary;
-    forecast.Date = updatedForecast.Date;
-
-    await db.SaveChangesAsync();
-
-    return Results.NoContent();
+        cache.Set(city, weather, cacheEntryOptions);
+        return Results.Ok($"Cache for city {city} updated.");
+    }
+    else
+        return Results.NotFound("Weather data not found for the specified city.");
 });
 
-app.MapDelete("/weather/{id}", async (int id, WeatherForecastDbContext db) =>
+app.MapDelete("/weather/cache-delete/{city}", (string city, IMemoryCache cache) =>
 {
-    var forecast = await db.WeatherForecasts.FindAsync(id);
+    cache.Remove(city);
+    return Results.Ok($"Cache for city {city} removed.");
+});
 
-    if (forecast == null)
-        return Results.NotFound();
+app.MapDelete("/cache/clear", (IMemoryCache cache) =>
+{
+    if (cache is MemoryCache concreteMemoryCache)
+        concreteMemoryCache.Clear();
 
-    db.WeatherForecasts.Remove(forecast);
-
-    await db.SaveChangesAsync();
-
-    return Results.NoContent();
+    return Results.Ok("Cache cleared.");
 });
 
 using (var scope = app.Services.CreateScope())
